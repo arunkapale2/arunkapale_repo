@@ -16,7 +16,16 @@ from support import (MODEL, SYSTEM_PROMPT, call_local, execute_tool, mcp_client,
 
 MAX_TOOL_CALLS = 8  # Larkspur's own build capped the loop here; then a human takes over.
 
-TONE_ADDENDUM = ""                       # ✏️ Build 4, step 4.1, intelligence goal
+TONE_ADDENDUM = (
+    "\n\nTONE AND ESCALATION: If the customer is abusive, insults staff, or threatens "
+    "legal action (a lawyer, a lawsuit, a regulator or the press), do not answer with "
+    "a normal entitlements rundown. Acknowledge the complaint once, in one calm sentence, "
+    "without defending the airline and without arguing. Call escalate_to_human with the "
+    "PNR, the reason, and a short summary_for_human that quotes what the customer said "
+    "and what you already know about the disruption. Do not issue vouchers, offer a "
+    "refund path, or promise any outcome or compensation. Tell the customer plainly that "
+    "a person will take it from here."
+)                    # ✏️ Build 4, step 4.1, intelligence goal
 EXTRA_TOOLS: List[Dict[str, Any]] = []   # ✏️ Build 2, step 2.1: schemas for the tools you add
 LOCAL_TOOLS: Dict[str, Any] = {}         # ✏️ Build 2, step 2.1: the functions behind them
 
@@ -68,7 +77,7 @@ def run_agent(pnr: str, last_name: str, message: str) -> str:            # ✏�
     answer = ""
     turns = 1
     while response.stop_reason == "tool_use" and turns < MAX_TOOL_CALLS:
-        messages.append({"role": "assistant", "content": text_of(response)})
+        messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results(response)})
         answer = text_of(response)
         response = client.messages.create(
@@ -77,13 +86,13 @@ def run_agent(pnr: str, last_name: str, message: str) -> str:            # ✏�
         )
         turns += 1
 
-    return answer
+    return text_of(response)
 
 
 def tool_list() -> List[Dict[str, Any]]:                   # ✏️ Build 2, step 2.2
     """Given. Exactly what Claude is offered on every turn; run.py --show-tools
     prints this list."""
-    return build_tools() + EXTRA_TOOLS
+    return build_tools() + EXTRA_TOOLS + mcp_client.tools()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -119,17 +128,30 @@ def build_tools() -> List[Dict[str, Any]]:                 # ✏️ Build 1, ste
                 "type": "object",
                 "properties": {
                     "flight_no": {"type": "string"},
-                    "date": {"type": "string", "description": "MM/DD/YYYY"},
+                    "date": {"type": "string", "description": "Local flight date, ISO format YYYY-MM-DD (e.g. 2025-05-08), not MM/DD/YYYY"},
                 },
                 "required": ["flight_no", "date"],
             },
         },
         {
             "name": "search_alternatives",
-            "description": "search",
+            "description": (
+                "Find rebooking options for the disrupted segment on this PNR: other "
+                "Larkspur flights on the same route with open seats for the whole party, "
+                "each with an option_id, flights, date, times, fare difference and status. "
+                "Use it after get_flight_status confirms a cancellation or significant "
+                "delay and the customer wants to travel. Read-only: it does not hold or "
+                "book anything; pass an option_id to hold_seat to do that. It searches for "
+                "the passengers on this booking only (passenger_count from lookup_booking). "
+                "If the customer asks about a different party size, for example 'room for "
+                "the three of us' on a booking with one passenger, do not quote seat counts "
+                "or say there is room for that party: say the booking lists passenger_count "
+                "passengers, ask for the other travellers' confirmation codes (or hand off "
+                "to a human), and offer options only for the passengers actually on the booking."
+            ),
             "input_schema": {
                 "type": "object",
-                "properties": {"pnr": {"type": "string"}},
+                "properties": {"pnr": {"type": "string", "description": "Confirmation code (PNR) from lookup_booking"}},
                 "required": ["pnr"],
             },
         },
@@ -142,7 +164,10 @@ def build_tools() -> List[Dict[str, Any]]:                 # ✏️ Build 1, ste
                 "what get_flight_status told you; fare_family, loyalty_tier and whether this "
                 "is overnight are looked up from the booking, not asked of you. Every "
                 "response carries a policy_row_id. Cite it if you reference this decision "
-                "again."
+                "again. When you decline a hotel, voucher, goodwill or any other request "
+                "because the response says it is not eligible, give the reason the response "
+                "itself carries (for example cause_class 'uncontrollable', the band, the "
+                "policy_row_id) in plain words, and never invent a reason of your own."
             ),
             "input_schema": {
                 "type": "object",
